@@ -18,27 +18,36 @@ st.set_page_config(
     page_icon="assistant"
 )
 
+# --- SECURITY & PRIVACY BANNER ---
+st.warning(
+    "**Privacy & Data Safety:** Please ensure that any uploaded images or PDFs do not contain "
+    "Personally Identifiable Information (PII) such as full names, home addresses, or government IDs. "
+    "Always de-identify records before uploading.",
+    icon="🔒"
+)
+
 # Initialize OpenAI Client
+# Note: Ensure OPENAI_API_KEY is set in your Streamlit Cloud Secrets
 if 'OPENAI_API_KEY' in st.secrets:
     os.environ['OPENAI_API_KEY'] = st.secrets['OPENAI_API_KEY']
+    client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
 else:
-    st.error("Please set the OPENAI_API_KEY in your Streamlit secrets.")
+    st.error("Missing API Key. Please add 'OPENAI_API_KEY' to your Streamlit Secrets.")
+    st.stop()
 
-client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
-
-# Initialize session state for messages if it doesn't exist
+# Initialize session state for messages (System message added ONLY once)
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "system", "content": "You are a helpful assistant with expertise in medicine."}
+        {"role": "system", "content": "You are a helpful assistant with expertise in medicine. Provide clear, accurate information based on the context provided."}
     ]
 
-# Helper: Encode Image
+# Helper: Encode Image for Vision Support
 def encode_image(image_file):
     return base64.b64encode(image_file.read()).decode('utf-8')
 
-# Core Logic: Generate Response
+# Core Logic: Generate Response using gpt-oss-120b
 def generate_response(prompt, image=None, pdf=None):
-    # Construct the message content based on input type
+    # Construct message content based on input type
     if image:
         base64_image = encode_image(image)
         user_content = [
@@ -47,42 +56,48 @@ def generate_response(prompt, image=None, pdf=None):
         ]
     elif pdf:
         reader = PdfReader(pdf)
-        pdf_text = ""
-        for page in reader.pages:
-            pdf_text += page.extract_text()
-        user_content = f"User Question: {prompt}\n\nExtracted PDF Content:\n{pdf_text}"
+        pdf_text = "".join([page.extract_text() for page in reader.pages])
+        user_content = f"User Question: {prompt}\n\nDocument Context:\n{pdf_text}"
     else:
         user_content = prompt
 
-    # Add the user's message to the session history
+    # Add user message to history
     st.session_state.messages.append({"role": "user", "content": user_content})
 
     try:
+        # Calling the open-weight reasoning model gpt-oss-120b
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-oss-120b",
             messages=st.session_state.messages,
             max_tokens=4096,
             temperature=0.3
         )
-        assistant_message = response.choices[0].message.content.strip()
+        assistant_reply = response.choices[0].message.content.strip()
         
-        # Add assistant response to session history
-        st.session_state.messages.append({"role": "assistant", "content": assistant_message})
-        return assistant_message
+        # Add assistant response to history
+        st.session_state.messages.append({"role": "assistant", "content": assistant_reply})
+        return assistant_reply
 
     except openai.RateLimitError:
-        st.error("Rate limit reached. Please check your OpenAI plan, billing credits, or usage limits.")
+        st.error("Rate limit reached. Please check your OpenAI account balance or Tier limits.")
         return None
     except Exception as e:
-        st.error(f"An error occurred: {e}")
+        st.error(f"Error calling gpt-oss-120b: {e}")
         return None
 
 # UI Layout
 st.subheader("MedChat LLM")
 
 with st.sidebar:
+    st.markdown("### 🛠️ Configuration")
+    st.info("Using Model: **gpt-oss-120b**")
+    
+    st.divider()
+    
     st.subheader("Attach your files")
-    uploaded_file = st.file_uploader("Upload an Image or PDF", type=["pdf", "jpg", "jpeg", "png"])
+    uploaded_file = st.file_uploader("Upload Image or PDF", type=["pdf", "jpg", "jpeg", "png"])
+    
+    st.divider()
     
     if st.button("Clear Chat History"):
         st.session_state.messages = [
@@ -90,98 +105,103 @@ with st.sidebar:
         ]
         st.rerun()
 
-# User input form
+# User Input Form
 with st.form(key='response_form', clear_on_submit=True):
-    user_input = st.text_area('Enter your question here:', placeholder="How can I help you today?", label_visibility='collapsed')
+    user_input = st.text_area('Your Question:', placeholder="e.g., Explain the findings in this document...", label_visibility='collapsed')
     submit_button = st.form_submit_button("Submit")
 
     if submit_button and user_input:
-        with st.spinner("Generating response..."):
-            if uploaded_file is not None:
+        with st.spinner("Analyzing with gpt-oss-120b..."):
+            if uploaded_file:
                 file_type = uploaded_file.type
                 if file_type == "application/pdf":
                     generate_response(user_input, pdf=uploaded_file)
-                elif file_type in ["image/jpeg", "image/png"]:
+                else:
                     generate_response(user_input, image=uploaded_file)
             else:
                 generate_response(user_input)
         st.rerun()
 
-# Display Chat History (Filtering out system messages)
+# Display Chat History
 st.markdown("---")
 st.markdown("### Chat History")
 
-# Display in reverse order (newest at top) as per your original logic
-display_messages = [m for m in st.session_state.messages if m["role"] != "system"]
-for message in reversed(display_messages):
-    col1, col2 = st.columns([0.8, 0.2])
-    
+# Reverse display for readability (newest at top), excluding system prompt
+visible_history = [m for m in st.session_state.messages if m["role"] != "system"]
+for message in reversed(visible_history):
     if message["role"] == "user":
-        with col2:
-            st.markdown(f"<div style='text-align: right; color: blue;'><b>You:</b><br>{message['content']}</div>", unsafe_allow_html=True)
-    elif message["role"] == "assistant":
-        with col1:
-            st.markdown(f"<div style='color: green;'><b>Assistant 🤖:</b><br>{message['content']}</div>", unsafe_allow_html=True)
+        # Check if content is a list (image/text mix) or just a string
+        text_content = message["content"]
+        if isinstance(text_content, list):
+            text_content = text_content[0]["text"] # Extract prompt from multimodal list
+            
+        st.markdown(
+            f"<div style='text-align: right; color: #1E90FF; padding: 10px;'>"
+            f"<b>You:</b><br>{text_content}</div>", 
+            unsafe_allow_html=True
+        )
+    else:
+        st.markdown(
+            f"<div style='text-align: left; color: #2E8B57; padding: 10px; background-color: #f9f9f9; border-radius: 5px;'>"
+            f"<b>Assistant 🤖:</b><br>{message['content']}</div>", 
+            unsafe_allow_html=True
+        )
 
-# PDF Export Functionality
+# PDF Export Logic
 def create_pdf(chat_text):
     buffer = io.BytesIO()
-    pdf = canvas.Canvas(buffer, pagesize=letter)
+    p = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
-    
-    # Attempt to use Arial if available, otherwise fallback to Helvetica
-    try:
-        pdfmetrics.registerFont(TTFont('Arial', 'Arial.ttf'))
-        font_name = "Arial"
-    except:
-        font_name = "Helvetica"
+    p.setFont("Helvetica", 10)
 
     y = height - 50
     margin = 50
     line_height = 14
-    max_width = width - (2 * margin)
-
-    pdf.setFont(font_name, 10)
+    max_w = width - (2 * margin)
 
     for line in chat_text.splitlines():
         if y < 100:
-            pdf.showPage()
+            p.showPage()
             y = height - 50
-            pdf.setFont(font_name, 10)
+            p.setFont("Helvetica", 10)
         
-        if line.startswith("User:"):
-            pdf.setFillColor(colors.blue)
-        elif line.startswith("Assistant:"):
-            pdf.setFillColor(colors.green)
-        else:
-            pdf.setFillColor(colors.black)
+        # Color coding in export
+        if line.startswith("User:"): p.setFillColor(colors.blue)
+        elif line.startswith("Assistant:"): p.setFillColor(colors.green)
+        else: p.setFillColor(colors.black)
 
-        # Basic text wrapping logic
+        # Basic Wrap
         words = line.split()
-        current_line = ""
+        curr = ""
         for word in words:
-            test_line = f"{current_line} {word}".strip()
-            if pdf.stringWidth(test_line, font_name, 10) < max_width:
-                current_line = test_line
+            if p.stringWidth(f"{curr} {word}", "Helvetica", 10) < max_w:
+                curr = f"{curr} {word}".strip()
             else:
-                pdf.drawString(margin, y, current_line)
+                p.drawString(margin, y, curr)
                 y -= line_height
-                current_line = word
-        
-        pdf.drawString(margin, y, current_line)
+                curr = word
+        p.drawString(margin, y, curr)
         y -= line_height
 
-    pdf.save()
+    p.save()
     buffer.seek(0)
     return buffer.getvalue()
 
-# Export Button
-if len(display_messages) > 0:
-    chat_string = "\n".join([f"{m['role'].capitalize()}: {m['content']}" for m in display_messages])
-    pdf_data = create_pdf(chat_string)
+# Sidebar Export Button
+if len(visible_history) > 0:
+    # Clean string for PDF export
+    export_lines = []
+    for m in visible_history:
+        role = m['role'].capitalize()
+        content = m['content'][0]['text'] if isinstance(m['content'], list) else m['content']
+        export_lines.append(f"{role}: {content}")
+    
+    chat_str = "\n".join(export_lines)
+    pdf_bin = create_pdf(chat_str)
+    
     st.sidebar.download_button(
-        label="Export Conversation as PDF",
-        data=pdf_data,
-        file_name='chat_history.pdf',
+        label="Download Chat History (PDF)",
+        data=pdf_bin,
+        file_name='medchat_history.pdf',
         mime='application/pdf'
     )
