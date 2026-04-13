@@ -25,19 +25,26 @@ st.warning(
     "Always de-identify records before uploading."
 )
 
-# Initialize OpenAI Client
-if 'OPENAI_API_KEY' in st.secrets:
-    os.environ['OPENAI_API_KEY'] = st.secrets['OPENAI_API_KEY']
-    client = OpenAI(api_key=os.environ['OPENAI_API_KEY'])
+# Initialize NaviGator Toolkit Client
+if 'NAVIGATOR_TOOLKIT_API_KEY' in st.secrets:
+    os.environ['NAVIGATOR_TOOLKIT_API_KEY'] = st.secrets['NAVIGATOR_TOOLKIT_API_KEY']
+    client = OpenAI(
+        api_key=os.environ['NAVIGATOR_TOOLKIT_API_KEY'],
+        base_url="https://api.ai.it.ufl.edu/v1"
+    )
 else:
-    st.error("Missing API Key. Please add 'OPENAI_API_KEY' to your Streamlit Secrets.")
+    st.error("Missing API Key. Please add 'NAVIGATOR_TOOLKIT_API_KEY' to your Streamlit Secrets.")
     st.stop()
 
-# Initialize session state for messages
+# Initialize session state for messages and errors
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "system", "content": "You are a helpful assistant with expertise in medicine. Provide clear, accurate information based on the context provided."}
     ]
+    # No pre-filled assistant message in data history to ensure strict role alternation (system -> user -> assistant)
+
+if "error" not in st.session_state:
+    st.session_state.error = None
 
 # Helper: Encode Image
 def encode_image(image_file):
@@ -62,7 +69,7 @@ def generate_response(prompt, image=None, pdf=None):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-oss-120b",
+            model="gemma-3-27b-it",
             messages=st.session_state.messages,
             max_tokens=4096,
             temperature=0.3
@@ -72,16 +79,16 @@ def generate_response(prompt, image=None, pdf=None):
         return assistant_reply
 
     except openai.RateLimitError:
-        st.error("Rate limit reached. Please check your OpenAI account balance or Tier limits.")
+        st.session_state.error = "Rate limit reached. Please check your NaviGator Toolkit account limits."
         return None
     except Exception as e:
-        st.error(f"Error calling model: {e}")
+        st.session_state.error = f"Error calling model: {e}"
         return None
 
 # Sidebar Layout
 with st.sidebar:
     st.title("Settings")
-    st.info("Model: gpt-oss-120b")
+    st.info("Model: gemma-3 (NaviGator AI)")
     
     st.divider()
     
@@ -94,10 +101,11 @@ with st.sidebar:
         st.session_state.messages = [
             {"role": "system", "content": "You are a helpful assistant with expertise in medicine."}
         ]
+        st.session_state.error = None
         st.rerun()
 
 # Main UI
-st.title("MedChat LLM")
+st.title("NaviGator Chatbot")
 
 # User Input Form
 with st.container():
@@ -106,6 +114,7 @@ with st.container():
         submit_button = st.form_submit_button("Submit Request")
 
         if submit_button and user_input:
+            st.session_state.error = None # Clear previous errors
             with st.spinner("Processing..."):
                 if uploaded_file:
                     file_type = uploaded_file.type
@@ -117,27 +126,35 @@ with st.container():
                     generate_response(user_input)
             st.rerun()
 
+# Error Display (Persistently shown across reruns if present)
+if st.session_state.error:
+    st.error(st.session_state.error)
+    if st.button("Dismiss Error"):
+        st.session_state.error = None
+        st.rerun()
+
 # Chat Display
-st.markdown("### Conversation history")
+st.markdown("### Conversation History")
 
 visible_history = [m for m in st.session_state.messages if m["role"] != "system"]
-for message in reversed(visible_history):
-    if message["role"] == "user":
-        text_content = message["content"]
-        if isinstance(text_content, list):
-            text_content = text_content[0]["text"]
-            
-        st.markdown(
-            f"<div style='text-align: right; padding: 15px; border-bottom: 1px solid #eee;'>"
-            f"<b style='color: #4682B4;'>User</b><br>{text_content}</div>", 
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown(
-            f"<div style='text-align: left; padding: 15px; background-color: #fcfcfc; border-bottom: 1px solid #eee; border-left: 5px solid #2E8B57;'>"
-            f"<b style='color: #2E8B57;'>Assistant</b><br>{message['content']}</div>", 
-            unsafe_allow_html=True
-        )
+
+# Show a greeting if the history is empty
+if not visible_history:
+    with st.chat_message("assistant"):
+        st.markdown("Hello! I am your NaviGator AI assistant. How can I help you today?")
+
+for message in visible_history:
+    with st.chat_message(message["role"]):
+        content = message["content"]
+        if isinstance(content, list):
+            # Handle mixed content (images + text)
+            for item in content:
+                if item["type"] == "text":
+                    st.markdown(item["text"])
+                elif item["type"] == "image_url":
+                    st.image(item["image_url"]["url"])
+        else:
+            st.markdown(content)
 
 # PDF Export Logic
 def create_pdf(chat_text):
